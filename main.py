@@ -15,93 +15,77 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
 
-# Модели базы данных
-class WorkoutDB(Base):
-    __tablename__ = "workouts"
-
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    date = Column(Date, nullable=False)
-    comments = Column(String)
-
-    exercises = relationship("ExerciseDB", back_populates="workout", cascade="all, delete")
-
+# Модель упражнения
 class ExerciseDB(Base):
     __tablename__ = "exercises"
 
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    workout_id = Column(String, ForeignKey("workouts.id"))
+    id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False)
-    notes = Column(String)
+    description = Column(String)
 
-    workout = relationship("WorkoutDB", back_populates="exercises")
     sets = relationship("SetDB", back_populates="exercise", cascade="all, delete")
 
 
+# Модель подхода
 class SetDB(Base):
     __tablename__ = "sets"
 
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    id = Column(Integer, primary_key=True, autoincrement=True)
     exercise_id = Column(String, ForeignKey("exercises.id"))
     weight = Column(Float, nullable=False)
     reps = Column(Integer, nullable=False)
     set_number = Column(Integer, nullable=False)
+    date = Column(Date, nullable=False)  # Дата выполнения подхода
 
     exercise = relationship("ExerciseDB", back_populates="sets")
 
 # Создаем таблицы
 Base.metadata.create_all(bind=engine)
 
-
 # Pydantic модели (схемы)
 class SetBase(BaseModel):
     weight: float
     reps: int
     set_number: int
+    date: date  # Формат: "YYYY-MM-DD"
+
+    class Config:
+        json_encoders = {
+            date: lambda v: v.isoformat()  # Для корректной сериализации в JSON
+        }
 
 
 class SetCreate(SetBase):
-    pass
+    exercise_id: int
 
 
 class Set(SetBase):
-    id: str
+    id: int
 
     class Config:
         orm_mode = True
+        json_encoders = {
+            date: lambda v: v.isoformat()
+        }
 
 
 class ExerciseBase(BaseModel):
     name: str
-    notes: Optional[str] = None
+    description: Optional[str] = None
 
 
 class ExerciseCreate(ExerciseBase):
     pass
 
-
 class Exercise(ExerciseBase):
-    id: str
+    id: int
     sets: List[Set] = []
 
     class Config:
         orm_mode = True
-
-
-class WorkoutBase(BaseModel):
-    date: date
-    comments: Optional[str] = None
-
-
-class WorkoutCreate(WorkoutBase):
-    pass
-
-
-class Workout(WorkoutBase):
-    id: str
-    exercises: List[Exercise] = []
-
-    class Config:
-        orm_mode = True
+        json_encoders = {
+            date: lambda v: v.isoformat()
+        }
 
 app = FastAPI()
 
@@ -113,53 +97,51 @@ def get_db():
     finally:
         db.close()
 
-
 # Роуты
-@app.post("/workouts/", response_model=Workout, status_code=201)
-def create_workout(workout: WorkoutCreate, db: Session = Depends(get_db)):
-    db_workout = WorkoutDB(**workout.dict())
-    db.add(db_workout)
-    db.commit()
-    db.refresh(db_workout)
-    return db_workout
-
-
-@app.get("/workouts/", response_model=List[Workout])
-def get_workouts(db: Session = Depends(get_db)):
-    workouts = db.query(WorkoutDB).all()
-    return workouts
-
-
-@app.post("/workouts/{workout_id}/exercises/", response_model=Exercise, status_code=201)
-def create_exercise(workout_id: str, exercise: ExerciseCreate, db: Session = Depends(get_db)):
-    db_workout = db.query(WorkoutDB).filter(WorkoutDB.id == workout_id).first()
-    if not db_workout:
-        raise HTTPException(status_code=404, detail="Workout not found")
-
-    db_exercise = ExerciseDB(**exercise.dict(), workout_id=workout_id)
+# Роуты для упражнений
+@app.post("/exercises/", response_model=Exercise, status_code=201)
+def create_exercise(exercise: ExerciseCreate, db: Session = Depends(get_db)):
+    db_exercise = ExerciseDB(**exercise.model_dump())
     db.add(db_exercise)
     db.commit()
     db.refresh(db_exercise)
     return db_exercise
 
 
-@app.post("/exercises/{exercise_id}/sets/", response_model=Set, status_code=201)
-def create_set(exercise_id: str, set_data: SetCreate, db: Session = Depends(get_db)):
-    db_exercise = db.query(ExerciseDB).filter(ExerciseDB.id == exercise_id).first()
-    if not db_exercise:
+@app.get("/exercises/", response_model=List[Exercise])
+def get_exercises(db: Session = Depends(get_db)):
+    return db.query(ExerciseDB).all()
+
+
+@app.get("/exercises/{exercise_id}", response_model=Exercise)
+def get_exercise(exercise_id: str, db: Session = Depends(get_db)):
+    exercise = db.query(ExerciseDB).filter(ExerciseDB.id == exercise_id).first()
+    if not exercise:
+        raise HTTPException(status_code=404, detail="Exercise not found")
+    return exercise
+
+# Роуты для подходов
+@app.post("/sets/", response_model=Set, status_code=201)
+def create_set(set_data: SetCreate, db: Session = Depends(get_db)):
+    # Проверяем существование упражнения
+    if not db.query(ExerciseDB).filter(ExerciseDB.id == set_data.exercise_id).first():
         raise HTTPException(status_code=404, detail="Exercise not found")
 
-    db_set = SetDB(**set_data.dict(), exercise_id=exercise_id)
+    db_set = SetDB(**set_data.model_dump())
     db.add(db_set)
     db.commit()
     db.refresh(db_set)
     return db_set
 
 
-@app.get("/exercises/{exercise_id}/sets/", response_model=List[Set])
+@app.get("/exercises/{exercise_id}/sets", response_model=List[Set])
 def get_exercise_sets(exercise_id: str, db: Session = Depends(get_db)):
-    db_exercise = db.query(ExerciseDB).filter(ExerciseDB.id == exercise_id).first()
-    if not db_exercise:
+    exercise = db.query(ExerciseDB).filter(ExerciseDB.id == exercise_id).first()
+    if not exercise:
         raise HTTPException(status_code=404, detail="Exercise not found")
+    return exercise.sets
 
-    return db_exercise.sets
+
+@app.get("/sets/recent", response_model=List[Set])
+def get_recent_sets(limit: int = 10, db: Session = Depends(get_db)):
+    return db.query(SetDB).order_by(SetDB.date.desc()).limit(limit).all()
